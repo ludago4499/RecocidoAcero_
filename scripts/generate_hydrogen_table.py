@@ -2,7 +2,7 @@
 Generate the hydrogen property table used by properties.hydrogen_properties.
 
 Queries CoolProp for normal hydrogen at a fixed pressure over a temperature grid and writes
-data/hydrogen.csv with columns T, rho, mu, k, cp. Run once; the main code only reads the CSV
+bell_furnace/data/hydrogen.csv with columns T, rho, mu, k, cp. Run once; the main code only reads the CSV
 and does not need CoolProp installed.
 
 CoolProp hydrogen sources:
@@ -63,6 +63,6 @@ def generate_hydrogen_table(*, output: Path, T_min: float = 250.0, T_max: float 
 
 
 if __name__ == '__main__':
-    path = Path(__file__).resolve().parent.parent / 'data' / 'hydrogen.csv'
+    path = Path(__file__).resolve().parent.parent / 'bell_furnace' / 'data' / 'hydrogen.csv'
     result = generate_hydrogen_table(output=path)
     print(f'wrote {result.shape[0]} rows to {path}')
