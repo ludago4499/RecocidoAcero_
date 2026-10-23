@@ -530,8 +530,8 @@ if __name__ == '__main__':
 
     results = simulate_stack(meshes=meshes, T_initial=303.15, schedule_time=schedule_time, schedule_temperature=schedule_temperature, h_function=h_function, lambda_r_function=lambda_r_function)
 
-    print('coil  ID [m]  hot/cold at end of heating [K]  cold spot within 20 K of hold [h]  steps')
+    print('coil  ID [m]  hot/cold at end of heating [K]  cold spot within 73 K of hold [h]  steps')
     for i, (coil, result) in enumerate(zip(coils, results)):
         k = int(np.searchsorted(result['time'], 12 * hour))
-        t_soak = time_to_reach(time=result['time'], values=result['T_min'], target=900)
+        t_soak = time_to_reach(time=result['time'], values=result['T_min'], target=973-73)
         print(f"{i + 1}#    {coil['inner_diameter']:.3f}   {result['T_max'][k]:.1f} / {result['T_min'][k]:.1f}                   {t_soak / hour:.2f}                             {result['n_steps']}")
