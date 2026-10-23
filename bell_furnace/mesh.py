@@ -147,7 +147,7 @@ def build_stack(*, coils: list[dict[str, float]], n_r: int, n_z: int, geometry: 
 
     Args:
         coils:    list of dicts with keys inner_diameter, outer_diameter and width in m, bottom coil first
-        n_r:      number of radial nodes per coil
+        n_r:      numbe r of radial nodes per coil
         n_z:      number of axial nodes per coil
         geometry: 'axisymmetric' or 'planar'
 
@@ -174,9 +174,7 @@ def stable_time_step(*, mesh: dict[str, np.ndarray | float | int | str], rho_c: 
     Compute the largest stable time step of the explicit scheme.
 
     For each node the explicit update is T_new = T + dt / C * (sum of G * (T_neighbour - T) +
-    sum of h * A * (T_g - T)) with C = rho_c * volume. The coefficient of the old T stays positive
-    when dt < C / (sum of G + sum of h * A). This generalises the paper's Eq. 4 to every interior,
-    edge and corner node and to the axisymmetric geometry.
+    sum of h * A * (T_g - T)) with C = rho_c * volume.
 
     Args:
         mesh:   mesh dict from build_mesh

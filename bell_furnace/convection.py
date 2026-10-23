@@ -87,10 +87,7 @@ def convection_power(
 
     return q_flux * area
 
-
-# ------------------------------------------------------------------------------------------------
-# Eqs. 7-8 of Yang et al. (2025): convection coefficient of the protective gas
-# ------------------------------------------------------------------------------------------------
+# Eqs. 7-8 of Yang et al. (2025)
 
 RADIATION_SWITCH_TEMPERATURE = 800.0  # K, above this Eq. 8 multiplies h by xi
 
