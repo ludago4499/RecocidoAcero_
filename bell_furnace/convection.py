@@ -7,6 +7,9 @@ Original file is located at
     https://colab.research.google.com/drive/1F-Ss4a5My0gCaLVnI9Y81cJ_mSJDcuzE
 """
 
+import numpy as np
+
+
 def convection_heat_flux(
     *,
     h_eff: float,
@@ -83,3 +86,143 @@ def convection_power(
     )
 
     return q_flux * area
+
+
+# ------------------------------------------------------------------------------------------------
+# Eqs. 7-8 of Yang et al. (2025): convection coefficient of the protective gas
+# ------------------------------------------------------------------------------------------------
+
+RADIATION_SWITCH_TEMPERATURE = 800.0  # K, above this Eq. 8 multiplies h by xi
+
+
+def convection_coefficient(*, u_g: float, D: float, L: float, k_g: float, mu_g: float, rho_g: float, psi: float) -> float:
+    '''
+    Compute the gas convection coefficient with the corrected Dittus-Boelter relation (Eq. 7).
+
+    h = 0.023 psi u_g^0.8 / D^0.2 k_g (mu_g / rho_g)^-0.8 [1 + (D / L)^0.7]
+
+
+    Args:
+        u_g:   mean gas velocity in the channel in m/s
+        D:     hydraulic diameter of the channel in m
+        L:     flow length of the channel in m
+        k_g:   gas thermal conductivity in W/(m K)
+        mu_g:  gas dynamic viscosity in Pa s
+        rho_g: gas density in kg/m3
+        psi:   convection enhancement coefficient caused by vortex
+
+    Returns:
+        Convection coefficient in W/(m2 K).
+
+    Raises:
+        ValueError if u_g is negative or any other input is not positive.
+    '''
+    if u_g < 0.0:
+        raise ValueError('u_g cannot be negative')
+    if min(D, L, k_g, mu_g, rho_g, psi) <= 0.0:
+        raise ValueError('D, L, k_g, mu_g, rho_g and psi must be positive')
+
+    return 0.023 * psi * u_g**0.8 / D**0.2 * k_g * (mu_g / rho_g) ** -0.8 * (1.0 + (D / L) ** 0.7)
+
+
+def composite_coefficient(*, h: float, T_g: float, xi: float, T_switch: float = RADIATION_SWITCH_TEMPERATURE) -> float:
+    '''
+    Apply the radiation enhancement of Eq. 8 to a convection coefficient.
+
+    k = h for T_g < 800 K and k = xi h for T_g >= 800 K.
+
+    Args:
+        h:        convection coefficient from Eq. 7 in W/(m2 K)
+        T_g:      gas temperature in K
+        xi:       radiation induced enhancement coefficient
+        T_switch: temperature where the enhancement starts in K
+
+    Returns:
+        Composite heat transfer coefficient in W/(m2 K).
+
+    Raises:
+        ValueError if h is negative or xi or T_g is not positive.
+    '''
+    if h < 0.0:
+        raise ValueError('h cannot be negative')
+    if xi <= 0.0 or T_g <= 0.0:
+        raise ValueError('xi and T_g must be positive')
+
+    return xi * h if T_g >= T_switch else h
+
+
+def simple_channel_geometry(*, area: float, D: float, L: float) -> dict[str, dict[str, float]]:
+    '''
+    Give every coil surface the same generic channel
+
+    Every surface sees one duct with the same flow area, hydraulic diameter and length. Simplified version 
+    for first submission.
+
+    Args:
+        area: flow area of the channel in m2
+        D:    hydraulic diameter of the channel in m
+        L:    flow length of the channel in m
+
+    Returns:
+        Dict with keys inner, outer, bottom, top; each value is the same dict with keys area in m2,
+        D in m and L in m.
+
+    Raises:
+        ValueError if a value is not positive.
+    '''
+    if min(area, D, L) <= 0.0:
+        raise ValueError('area, D and L must be positive')
+
+    channel = {'area': area, 'D': D, 'L': L}
+    return {surface: dict(channel) for surface in ('inner', 'outer', 'bottom', 'top')}
+
+
+# Channel geometry generated and not verified. Currently not in use...
+def channel_geometry(*, r_in: float, r_out: float, width: float, cover_radius: float, plate_gap: float, top_gap: float, is_top_coil: bool) -> dict[str, dict[str, float]]:
+    '''
+    Compute flow area, hydraulic diameter and flow length of the channel next to each coil surface.
+
+    Channels (simplified, the paper does not give the furnace geometry):
+        inner:  the coil bore, a pipe of radius r_in and length width
+        outer:  the annulus between the coil and the inner cover, length width
+        bottom: the convector plate below the coil, radial flow through a slot of height plate_gap,
+                flow area taken at the mean radius, length r_out - r_in
+        top:    the convector plate above the coil, or the top space under the inner cover for
+                the top coil (height top_gap)
+
+    Args:
+        r_in:         coil inner radius in m
+        r_out:        coil outer radius in m
+        width:        coil width in m
+        cover_radius: inner radius of the inner cover in m
+        plate_gap:    height of the convector plate passages in m
+        top_gap:      height of the space above the top coil in m
+        is_top_coil:  true for the top coil of the stack
+
+    Returns:
+        Dict with keys inner, outer, bottom, top; each value is a dict with keys area in m2,
+        D (hydraulic diameter) in m and L (flow length) in m.
+
+    Raises:
+        ValueError if a dimension is not positive, r_in >= r_out or cover_radius <= r_out.
+    '''
+    if min(r_in, width, plate_gap, top_gap) <= 0.0:
+        raise ValueError('r_in, width, plate_gap and top_gap must be positive in m')
+    if r_out <= r_in:
+        raise ValueError('r_out must be larger than r_in')
+    if cover_radius <= r_out:
+        raise ValueError('cover_radius must be larger than r_out')
+
+    r_mean = 0.5 * (r_in + r_out)
+    radial_length = r_out - r_in
+
+    def slot(gap: float) -> dict[str, float]:
+        # radial slot between two parallel discs: hydraulic diameter of parallel plates is 2 gap
+        return {'area': 2.0 * np.pi * r_mean * gap, 'D': 2.0 * gap, 'L': radial_length}
+
+    return {
+        'inner': {'area': np.pi * r_in**2, 'D': 2.0 * r_in, 'L': width},
+        'outer': {'area': np.pi * (cover_radius**2 - r_out**2), 'D': 2.0 * (cover_radius - r_out), 'L': width},
+        'bottom': slot(plate_gap),
+        'top': slot(top_gap if is_top_coil else plate_gap),
+    }
