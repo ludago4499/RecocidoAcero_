@@ -35,6 +35,13 @@ FURNACE = {
     'cover_diameter': 2.10,       # MOCK: inner diameter of the inner cover in m
     'plate_gap': 0.08,            # MOCK: height of the convector plate passages in m
     'top_gap': 0.30,              # MOCK: height of the space above the top coil in m
+    'channel_model': 'simple',    # 'simple': same duct on every surface, 'detailed': bore, annulus and plate slots
+    # used by 'simple'
+    'channel_area': 0.5,          # MOCK: flow area of the generic duct in m2
+    'channel_D': 0.2,             # MOCK: hydraulic diameter of the generic duct in m
+    'channel_L': 1.27,            # MOCK: flow length of the generic duct in m (about the coil width)
+    # used by 'detailed'
+    'cover_diameter': 2.10,
 }
 
 # ------------------------------------------------------------------------------------------------
