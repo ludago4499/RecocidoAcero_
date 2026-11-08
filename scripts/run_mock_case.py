@@ -5,11 +5,13 @@ Figures (saved in results/figures/<case>):
     1_coil_histories.png       hot spot, cold spot and gas temperature of every coil
     2_temperature_fields.png   r-z temperature field of the bottom and top coil at several times
     3_coefficients.png         h per surface and lambda_r against temperature
+    4_heating.gif / .mp4       optional (--animate): temperature field of the whole stack over time
 
 Usage, from the project root:
     python scripts/run_mock_case.py                          Ternium case, grades as in TERNIUM_COILS
     python scripts/run_mock_case.py --grade SAE1010          Ternium case, every coil SAE 1010
     python scripts/run_mock_case.py --case paper             paper case, generic steel
+    python scripts/run_mock_case.py --animate                also write 4_heating.gif (--animate mp4 needs ffmpeg)
 '''
 
 import argparse
@@ -18,6 +20,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -146,10 +149,87 @@ def plot_coefficients(*, h_function: callable, lambda_r_function: callable, path
     plt.close(fig)
 
 
+def animate_heating(*, meshes: list[dict], results: list[dict], path: Path, plate_gap: float = 0.08, fps: int = 12, max_frames: int = 150) -> None:
+    '''
+    Animate the r-z temperature field of the whole stack together with the gas, hot and cold spot curves.
+
+    The coils are drawn at their real height in the stack, separated by the convector plates. The
+    colour scale is fixed over the whole run so colours can be compared between frames.
+
+    Args:
+        meshes:     mesh dicts from build_stack, bottom coil first
+        results:    result dicts from simulate_stack, bottom coil first
+        path:       output path; .gif uses Pillow, .mp4 uses ffmpeg
+        plate_gap:  height of the convector plates between coils in m
+        fps:        frames per second
+        max_frames: saved times are skipped evenly so the animation has at most this many frames
+
+    Raises:
+        ValueError if the suffix of path is not .gif or .mp4.
+    '''
+    if path.suffix not in ('.gif', '.mp4'):
+        raise ValueError('path must end in .gif or .mp4')
+
+    to_c = 273.15
+    time_h = results[0]['time'] / HOUR
+    frames = np.unique(np.linspace(0, time_h.size - 1, min(max_frames, time_h.size)).astype(int))
+    T_low = min(r['T'].min() for r in results) - to_c
+    T_high = max(r['T'].max() for r in results) - to_c
+
+    fig, (ax_field, ax_curve) = plt.subplots(1, 2, figsize=(11, 6.5), gridspec_kw={'width_ratios': [1, 1.6]}, layout='constrained')
+
+    # stack: one gouraud mesh per coil, shifted up by the coils and plates below it
+    surfaces = []
+    z0 = 0.0
+    for i, (mesh, r) in enumerate(zip(meshes, results)):
+        quad = ax_field.pcolormesh(mesh['R'], mesh['Z'] + z0, r['T'][0] - to_c, shading='gouraud', cmap='inferno', vmin=T_low, vmax=T_high)
+        surfaces.append(quad)
+        ax_field.text(mesh['r_out'] + 0.02, z0 + 0.5 * mesh['width'], f"{i + 1}#\n{r['grade']}", va='center', fontsize=8)
+        z0 += mesh['width'] + plate_gap
+    r_max = max(m['r_out'] for m in meshes)
+    ax_field.set_xlim(0.0, r_max + 0.25)
+    ax_field.set_ylim(-0.05, z0)
+    ax_field.set_aspect('equal')
+    ax_field.axvline(0.0, color='gray', linestyle='-.', linewidth=0.8)
+    ax_field.set_xlabel('r (m)')
+    ax_field.set_ylabel('z (m)')
+    fig.colorbar(surfaces[0], ax=ax_field, label='Temperature (°C)', shrink=0.8)
+
+    # curves: gas and the hottest / coldest point of the whole stack
+    T_gas = results[0]['T_gas'] - to_c
+    T_hot = np.max([r['T_max'] for r in results], axis=0) - to_c
+    T_cold = np.min([r['T_min'] for r in results], axis=0) - to_c
+    ax_curve.plot(time_h, T_gas, '--', color='gray', label='Gas')
+    ax_curve.plot(time_h, T_hot, color='tab:red', label='Hot spot (stack)')
+    ax_curve.plot(time_h, T_cold, color='tab:blue', label='Cold spot (stack)')
+    marker = ax_curve.axvline(time_h[0], color='black', linewidth=1.0)
+    dots = ax_curve.plot([time_h[0]] * 3, [T_gas[0], T_hot[0], T_cold[0]], 'o', color='black', markersize=4)[0]
+    ax_curve.set_xlabel('Time (h)')
+    ax_curve.set_ylabel('Temperature (°C)')
+    ax_curve.grid(True)
+    ax_curve.legend(loc='upper right', fontsize=8)
+    title = fig.suptitle('')
+
+    def update(k: int) -> list:
+        for quad, r in zip(surfaces, results):
+            quad.set_array((r['T'][k] - to_c).ravel())
+        marker.set_xdata([time_h[k], time_h[k]])
+        dots.set_data([time_h[k]] * 3, [T_gas[k], T_hot[k], T_cold[k]])
+        title.set_text(f't = {time_h[k]:5.1f} h   gas {T_gas[k]:.0f} °C   stack {T_cold[k]:.0f} to {T_hot[k]:.0f} °C')
+        return [*surfaces, marker, dots, title]
+
+    animation = FuncAnimation(fig, update, frames=frames, blit=False)
+    writer = PillowWriter(fps=fps) if path.suffix == '.gif' else FFMpegWriter(fps=fps)
+    animation.save(path, writer=writer, dpi=100)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--case', choices=CASES, default='ternium')
     parser.add_argument('--grade', choices=sorted(STEEL_GRADES), default=None, help='force this grade on every coil')
+    parser.add_argument('--animate', nargs='?', const='gif', choices=('gif', 'mp4'), default=None, help='also write an animation of the stack heating (default gif; mp4 needs ffmpeg)')
+    parser.add_argument('--fps', type=int, default=12, help='frames per second of the animation')
     args = parser.parse_args()
 
     case = build_case(case=args.case, grade=args.grade, n_r=21, n_z=31)
@@ -176,6 +256,12 @@ if __name__ == '__main__':
     folder = FIGURES / case['name']
     folder.mkdir(parents=True, exist_ok=True)
     plot_histories(results=results, path=folder / '1_coil_histories.png', meshes=meshes, reference=reference)
-    plot_fields(meshes=meshes, results=results, times_h=[2.0, 6.0, 12.0, 22.0, 30.0], path=folder / '2_temperature_fields.png')
+    # 3 h in, start of the hold, end of the hold, 3 h after the hold
+    t_hold_start = case['heating_time'] / HOUR
+    t_hold_end = t_hold_start + case['holding_time'] / HOUR
+    field_times = [3.0, t_hold_start, t_hold_end, t_hold_end + 3.0]
+    plot_fields(meshes=meshes, results=results, times_h=field_times, path=folder / '2_temperature_fields.png')
     plot_coefficients(h_function=h_function, lambda_r_function=lambda_r_function, path=folder / '3_coefficients.png')
+    if args.animate is not None:
+        animate_heating(meshes=meshes, results=results, path=folder / f'4_heating.{args.animate}', plate_gap=case['furnace']['plate_gap'], fps=args.fps)
     print(f'Figures saved in {folder}')
