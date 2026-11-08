@@ -1,11 +1,19 @@
 '''
 Input parameters of the heat transfer model, separated by origin.
 
+Two cases:
+    paper:   CONTACT, FURNACE, TABLE_3 (Yang et al. 2025), generic steel
+    ternium: TERNIUM (raw data given by Ternium, in SI), FURNACE_TERNIUM, CONTACT_TERNIUM,
+             TERNIUM_COILS and SCHEDULE_TERNIUM; grades SAE 1006 and SAE 1010
+
 Two distinct type of data. Taken from Paper and Mock. First ones are taken from the Paper and hoped for the best.
 The latter are just mock from general
 
 Units: SI, except pressure and hardness in MPa because Eqs. 14-15 are written in MPa.
 '''
+
+import math
+
 
 # ------------------------------------------------------------------------------------------------
 # Interlayer contact of the coil, Eqs. 9-17 (keys match radial_conductivity.effective_radial_conductivity)
@@ -47,9 +55,112 @@ FURNACE = {
 # ------------------------------------------------------------------------------------------------
 # Data for the steel coils used. The first is the bottom layer.
 # ------------------------------------------------------------------------------------------------
-TABLE_3 = [
+TABLE_3 = [  # paper case, generic steel
     {'outer_diameter': 1.869, 'width': 1.272, 'thickness': 1.50e-3, 'mass': 24490.0},
     {'outer_diameter': 1.867, 'width': 1.250, 'thickness': 1.50e-3, 'mass': 23993.0},
     {'outer_diameter': 1.837, 'width': 1.272, 'thickness': 1.48e-3, 'mass': 23557.0},
     {'outer_diameter': 1.761, 'width': 1.272, 'thickness': 1.50e-3, 'mass': 21417.0},
 ]
+
+
+# ================================================================================================
+# Ternium case
+# ================================================================================================
+
+INCH = 0.0254  # m
+CUBIC_FOOT = 0.3048**3  # m3
+
+
+def fahrenheit_to_kelvin(T_f: float) -> float:
+    '''
+    Convert a temperature from degrees Fahrenheit to K.
+
+    Args:
+        T_f: temperature in degrees F
+
+    Returns:
+        Temperature in K.
+    '''
+    return (T_f - 32.0) * 5.0 / 9.0 + 273.15
+
+
+# ------------------------------------------------------------------------------------------------
+# Data given by Ternium (original units in the comments)
+# ------------------------------------------------------------------------------------------------
+
+TERNIUM = {
+    # 1. coil dimensions
+    'inner_diameter': 0.508,                              # 508 mm
+    'outer_diameter_max': 1.829,                          # 1,829 mm
+    'width_min': 0.720,                                   # 720 mm
+    'width_max': 1.320,                                   # 1,320 mm
+    'thickness_min': 0.30e-3,                             # 0.30 mm
+    'thickness_max': 3.49e-3,                             # 3.49 mm
+    # 2. furnace program (only the set point, no time curve)
+    'T_program': fahrenheit_to_kelvin(1650.0),            # 1,650 F (heating hood set point) = 1172.04 K
+    # 3. grades
+    'grades': ('SAE1006', 'SAE1010'),
+    # 4. bell
+    'bell_diameter': 2.451,                               # 2,451 mm, given as hydraulic diameter
+    'operating_height': 5.250,                            # 5,250 mm, given as circulation length
+    # 6. fan flow
+    'flow_rate': 52000.0 * CUBIC_FOOT / 60.0,             # 52,000 ft3/min = 24.54 m3/s
+    # 8-10. atmosphere and reference temperatures
+    'T_gas_saturation': fahrenheit_to_kelvin(1265.0),     # 1,265 F = 958.15 K, gas not touching the coils
+    'T_contact': fahrenheit_to_kelvin(1175.0),            # 1,175 F = 908.15 K, coil reference temperature
+    'probe_coil': 0,                                      # 'primer rollo', taken as the bottom coil (1#)
+    'probe_offset': 25.0 * INCH,                          # 25 in = 0.635 m from the inner diameter outward
+}
+
+# Not given by Ternium: 5. gas flow area, 7. roughness, 9-10. independent thermocouple readings,
+# the time curve of the furnace and the number of coils per charge.
+
+# ------------------------------------------------------------------------------------------------
+# Gas circulation, Ternium case. Same correlation constants as the paper.
+# ------------------------------------------------------------------------------------------------
+
+FURNACE_TERNIUM = {
+    **FURNACE,
+    'flow_basis': 'actual',                       # the fan moves a fixed actual volume, not normal m3
+    'q_flow': TERNIUM['flow_rate'],               # Ternium: 24.54 m3/s
+    'cover_diameter': TERNIUM['bell_diameter'],   # Ternium: 2.451 m
+    'channel_model': 'simple',
+    'channel_D': TERNIUM['bell_diameter'],        # Ternium: hydraulic diameter 2.451 m
+    'channel_L': TERNIUM['operating_height'],     # Ternium: circulation length 5.250 m
+    # ESTIMATE: Ternium has no flow area (point 5). Annulus between the bell and the largest coil.
+    'channel_area': math.pi / 4.0 * (TERNIUM['bell_diameter']**2 - TERNIUM['outer_diameter_max']**2),
+}
+
+# Ternium has no roughness or contact data (point 7), the paper values are kept.
+# Grade-specific contact values go in properties.STEEL_GRADES[grade]['contact'].
+CONTACT_TERNIUM = dict(CONTACT)
+
+# ------------------------------------------------------------------------------------------------
+# Coil stack, Ternium case. The first is the bottom coil.
+# MOCK: Ternium did not give a charge. 4 coils at the largest diameter, width chosen so the stack fits
+# the 5.250 m operating height with the mock plate_gap and top_gap. Edit freely within TERNIUM limits.
+# ------------------------------------------------------------------------------------------------
+
+TERNIUM_COILS = [
+    {'inner_diameter': 0.508, 'outer_diameter': 1.829, 'width': 1.150, 'thickness': 1.50e-3, 'grade': 'SAE1006'},
+    {'inner_diameter': 0.508, 'outer_diameter': 1.829, 'width': 1.150, 'thickness': 1.50e-3, 'grade': 'SAE1006'},
+    {'inner_diameter': 0.508, 'outer_diameter': 1.829, 'width': 1.150, 'thickness': 1.50e-3, 'grade': 'SAE1010'},
+    {'inner_diameter': 0.508, 'outer_diameter': 1.829, 'width': 1.150, 'thickness': 1.50e-3, 'grade': 'SAE1010'},
+]
+
+# ------------------------------------------------------------------------------------------------
+# Gas temperature schedule, Ternium case
+# The hold is the gas saturation temperature (1,265 F). The 1,650 F set point is the heating hood, which
+# never reaches the gas, so it is not used as the gas temperature. Ramp and hold times are MOCK.
+# ------------------------------------------------------------------------------------------------
+
+HOUR = 3600.0
+SCHEDULE_TERNIUM = {
+    'T_start': 303.15,                        # MOCK: room temperature charge
+    'T_hold': TERNIUM['T_gas_saturation'],    # Ternium: 958.15 K
+    'T_end': 423.15,                          # MOCK
+    'heating_time': 12.0 * HOUR,              # MOCK
+    'holding_time': 10.0 * HOUR,              # MOCK
+    'cooling_time': 20.0 * HOUR,              # MOCK
+}
+
