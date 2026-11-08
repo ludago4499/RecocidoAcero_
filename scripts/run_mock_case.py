@@ -65,21 +65,32 @@ def plot_fields(*, meshes: list[dict], results: list[dict], times_h: list[float]
         path:    output png path
     '''
     rows = [3, 0]  # top coil, bottom coil
-    fig, axes = plt.subplots(len(rows), len(times_h), figsize=(2.4 * len(times_h) + 1.2, 7.2), sharex=True, sharey=True)
+
+    # collect every field first so all panels share one temperature scale
+    fields = {}
+    for i in rows:
+        r = results[i]
+        for t_h in times_h:
+            k = int(np.argmin(np.abs(r['time'] - t_h * HOUR)))
+            fields[(i, t_h)] = r['T'][k] - 273.15
+    T_low = np.floor(min(T.min() for T in fields.values()) / 10.0) * 10.0
+    T_high = np.ceil(max(T.max() for T in fields.values()) / 10.0) * 10.0
+    if T_high <= T_low:
+        T_high = T_low + 10.0
+    levels = np.linspace(T_low, T_high, 21)
+
+    fig, axes = plt.subplots(len(rows), len(times_h), figsize=(2.4 * len(times_h) + 1.6, 7.2), sharex=True, sharey=True, layout='constrained')
     for row, i in enumerate(rows):
-        mesh, r = meshes[i], results[i]
+        mesh = meshes[i]
         for col, t_h in enumerate(times_h):
             ax = axes[row, col]
-            k = int(np.argmin(np.abs(r['time'] - t_h * HOUR)))
-            T = r['T'][k] - 273.15
-            cs = ax.contourf(mesh['R'], mesh['Z'], T, levels=12, cmap='inferno')
-            fig.colorbar(cs, ax=ax, label='Temperature (°C)')            
+            cs = ax.contourf(mesh['R'], mesh['Z'], fields[(i, t_h)], levels=levels, cmap='inferno', vmin=T_low, vmax=T_high)
             ax.set_title(f'Coil {i + 1}#, {t_h:g} h', fontsize=9)
             ax.set_aspect('equal')
         axes[row, 0].set_ylabel('z (m)')
     for ax in axes[-1]:
         ax.set_xlabel('r (m)')
-    fig.tight_layout()
+    fig.colorbar(cs, ax=axes, label='Temperature (°C)', shrink=0.9)
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
@@ -102,6 +113,7 @@ def plot_coefficients(*, h_function: callable, lambda_r_function: callable, path
     ax1.set_title('h, coil 2#')
     ax1.set_xlabel('Gas temperature (°C)')
     ax1.set_ylabel('h (W/(m² K))')
+    ax1.set_ylim(bottom=0)
     ax1.legend()
     ax1.grid(True)
 
@@ -111,6 +123,7 @@ def plot_coefficients(*, h_function: callable, lambda_r_function: callable, path
     ax2.set_title('λr, coil 1#')
     ax2.set_xlabel('Node temperature (°C)')
     ax2.set_ylabel('λr (W/(m K))')
+    ax2.set_ylim(bottom=0,top=25)
     ax2.legend()
     ax2.grid(True)
 
