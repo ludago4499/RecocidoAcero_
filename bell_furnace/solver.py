@@ -27,14 +27,14 @@ try:
     from .convection import channel_geometry, composite_coefficient, convection_coefficient, simple_channel_geometry
     from .flow import actual_flow_rate, surface_flows
     from .mesh import stable_time_step
-    from .properties import hydrogen_properties, steel_properties
+    from .properties import STEEL_GRADES, hydrogen_properties, steel_properties
     from .radial_conductivity import effective_radial_conductivity
 except ImportError:
     # works when running a script from inside the bell_furnace folder (python solver.py)
     from convection import channel_geometry, composite_coefficient, convection_coefficient, simple_channel_geometry
     from flow import actual_flow_rate, surface_flows
     from mesh import stable_time_step
-    from properties import hydrogen_properties, steel_properties
+    from properties import STEEL_GRADES, hydrogen_properties, steel_properties
     from radial_conductivity import effective_radial_conductivity
 
 
@@ -141,7 +141,32 @@ def placeholder_lambda_r(*, coil: int, T: np.ndarray, T_g: float) -> np.ndarray:
 # Model physics
 # ------------------------------------------------------------------------------------------------
 
-def make_lambda_r_function(*, strip_thickness: list[float], contact: dict[str, float]) -> FunctionType:
+def check_grades(*, grades: list[str] | None, n_coils: int) -> list[str]:
+    '''
+    Validate the steel grade list of a stack.
+
+    Args:
+        grades:  steel grade of each coil, bottom coil first; None means 'generic' for every coil
+        n_coils: number of coils in the stack
+
+    Returns:
+        List of n_coils grades.
+
+    Raises:
+        ValueError if grades has the wrong length or an unknown grade.
+    '''
+    if grades is None:
+        return ['generic'] * n_coils
+    grades = list(grades)
+    if len(grades) != n_coils:
+        raise ValueError(f'grades must have one entry per coil ({n_coils})')
+    unknown = set(grades) - STEEL_GRADES.keys()
+    if unknown:
+        raise ValueError(f'unknown steel grades {sorted(unknown)}, use {sorted(STEEL_GRADES)}')
+    return grades
+
+
+def make_lambda_r_function(*, strip_thickness: list[float], contact: dict[str, float], grades: list[str] | None = None) -> FunctionType:
     '''
     Build the radial conductivity plug-in from Eqs. 9-17. Wrap around function.
 
@@ -149,24 +174,32 @@ def make_lambda_r_function(*, strip_thickness: list[float], contact: dict[str, f
         strip_thickness: strip thickness S of each coil in m
         contact:         contact parameters with keys pressure, hardness, roughness, tan_theta,
                          epsilon, oxide_thickness, k_oxide, eta (see furnace_parameters.CONTACT)
+        grades:          steel grade of each coil (keys of properties.STEEL_GRADES); None uses
+                         'generic' for every coil. The grade sets k_s and may override contact keys.
 
     Returns:
         Function (*, coil, T, T_g) returning the radial conductivity in W/(m K) with the shape of T.
 
     Raises:
-        ValueError if strip_thickness is empty or has a non-positive value.
+        ValueError if strip_thickness is empty or has a non-positive value, or grades has the wrong
+        length or an unknown grade.
     '''
     thickness = []
     for s in strip_thickness:
         thickness.append(float(s))
     if not thickness or min(thickness) <= 0.0:
         raise ValueError('strip_thickness must contain positive values in m')
-    contact = dict(contact)
+    grades = check_grades(grades=grades, n_coils=len(thickness))
+
+    # contact parameters of each coil: case values, then the overrides of its grade
+    contacts = []
+    for grade in grades:
+        contacts.append({**contact, **STEEL_GRADES[grade]['contact']})
 
     def lambda_r_function(*, coil: int, T: np.ndarray, T_g: float) -> np.ndarray:
-        _, _, k_s = steel_properties(T)
+        _, _, k_s = steel_properties(T, grade=grades[coil])
         _, _, k_g, _ = hydrogen_properties(T)
-        return effective_radial_conductivity(T_m=T, T_g=T_g, k_s=k_s, k_g=k_g, s=thickness[coil], **contact)
+        return effective_radial_conductivity(T_m=T, T_g=T_g, k_s=k_s, k_g=k_g, s=thickness[coil], **contacts[coil])
 
     return lambda_r_function
 
@@ -181,10 +214,18 @@ def make_h_function(*, meshes: list[dict], furnace: dict) -> FunctionType:
     Returns:
         Function (*, coil, T_g, time) returning h in W/(m2 K) on inner, outer, bottom and top.
 
+    The fan flow is read with furnace['flow_basis']:
+        'normal' (default): furnace['q_normal'] in Nm3/s, expanded to the gas temperature (paper)
+        'actual':           furnace['q_flow'] in m3/s at the gas temperature, constant (Ternium)
+
     Raises:
-        ValueError if furnace['channel_model'] is not 'simple' or 'detailed'.
+        ValueError if furnace['channel_model'] is not 'simple' or 'detailed', or
+        furnace['flow_basis'] is not 'normal' or 'actual'.
     '''
     n_coils = len(meshes)
+    flow_basis = furnace.get('flow_basis', 'normal')
+    if flow_basis not in ('normal', 'actual'):
+        raise ValueError("flow_basis must be 'normal' or 'actual'")
 
     # Share of the fan flow that reaches each surface of each coil (Eqs. 5-6)
     fractions = surface_flows(q_total=1.0, n_coils=n_coils, zeta=furnace['zeta'])
@@ -201,7 +242,10 @@ def make_h_function(*, meshes: list[dict], furnace: dict) -> FunctionType:
         channels.append(channel)
 
     def h_function(*, coil: int, T_g: float, time: float) -> dict[str, float]:
-        q_actual = actual_flow_rate(q_normal=furnace['q_normal'], T_g=T_g, pressure=furnace['pressure'])
+        if flow_basis == 'actual':
+            q_actual = furnace['q_flow']
+        else:
+            q_actual = actual_flow_rate(q_normal=furnace['q_normal'], T_g=T_g, pressure=furnace['pressure'])
         rho_g, mu_g, k_g, _ = hydrogen_properties(T_g)
         h = {}
         for surface in SURFACES:
@@ -284,7 +328,7 @@ def node_heat_rates(*, T: np.ndarray, T_g: float, mesh: dict, G_r: np.ndarray, G
     return q
 
 
-def explicit_step(*, T: np.ndarray, T_g: float, mesh: dict, coil: int, h: dict[str, float], lambda_r_function: FunctionType, dt_max: float, safety: float, T_g_peak: float | None = None) -> tuple[np.ndarray, float]:
+def explicit_step(*, T: np.ndarray, T_g: float, mesh: dict, coil: int, h: dict[str, float], lambda_r_function: FunctionType, dt_max: float, safety: float, T_g_peak: float | None = None, grade: str = 'generic') -> tuple[np.ndarray, float]:
     '''
     Advance the coil temperature by one explicit time step. 
     At each step:
@@ -312,6 +356,7 @@ def explicit_step(*, T: np.ndarray, T_g: float, mesh: dict, coil: int, h: dict[s
                            as its T_g; None uses T_g. Eq. 17 uses the emulsion form only while
                            heating below 800 K: once the gas has passed 800 K the emulsion is gone
                            and the oxide form holds for the rest of the cycle, cooling included.
+        grade:             steel grade of this coil (key of properties.STEEL_GRADES)
 
     Returns:
         Tuple (T_new, dt): new temperatures in K and the step actually taken in s.
@@ -320,7 +365,7 @@ def explicit_step(*, T: np.ndarray, T_g: float, mesh: dict, coil: int, h: dict[s
         ValueError if lambda_r_function returns the wrong shape or a non-positive value; errors from
         steel_properties (temperature outside the table) and stable_time_step pass through.
     '''
-    rho, cp, k = steel_properties(T)
+    rho, cp, k = steel_properties(T, grade=grade)
     rho_c = rho * cp
 
     T_g_regime = T_g if T_g_peak is None else max(T_g, T_g_peak)
@@ -345,7 +390,7 @@ def explicit_step(*, T: np.ndarray, T_g: float, mesh: dict, coil: int, h: dict[s
 # Time loop
 # ------------------------------------------------------------------------------------------------
 
-def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.ndarray, schedule_temperature: np.ndarray, h_function: FunctionType = placeholder_h, lambda_r_function: FunctionType = placeholder_lambda_r, dt_max: float = 30.0, save_interval: float = 600.0, safety: float = 0.9) -> dict:
+def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.ndarray, schedule_temperature: np.ndarray, h_function: FunctionType = placeholder_h, lambda_r_function: FunctionType = placeholder_lambda_r, dt_max: float = 30.0, save_interval: float = 600.0, safety: float = 0.9, grade: str = 'generic') -> dict:
     '''
     Simulate one coil from time 0 to the end of the gas schedule.
 
@@ -363,6 +408,7 @@ def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.
         dt_max:               largest time step in s
         save_interval:        time between saved results in s
         safety:               factor in (0, 1] applied to the stability limit
+        grade:                steel grade of this coil (key of properties.STEEL_GRADES)
 
     Returns:
         Dict with keys:
@@ -372,6 +418,7 @@ def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.
             T_min:    cold spot temperature in K, shape (n_save,)
             T_max:    hot spot temperature in K, shape (n_save,)
             T_mean:   volume-weighted mean coil temperature in K, shape (n_save,)
+            grade:    steel grade of the coil
             n_steps:  number of time steps taken
             dt_min:   smallest step taken because of stability in s (shows if dt_max was limiting)
 
@@ -415,7 +462,7 @@ def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.
 
         limit = min(dt_max, next_save - t) # limit for dt
         T_g_peak = max(T_g_peak, T_g)
-        T, dt = explicit_step(T=T, T_g=T_g, mesh=mesh, coil=coil, h=h, lambda_r_function=lambda_r_function, dt_max=limit, safety=safety, T_g_peak=T_g_peak)
+        T, dt = explicit_step(T=T, T_g=T_g, mesh=mesh, coil=coil, h=h, lambda_r_function=lambda_r_function, dt_max=limit, safety=safety, T_g_peak=T_g_peak, grade=grade)
 
         # after explicit_step
         t += dt 
@@ -437,12 +484,13 @@ def simulate_coil(*, mesh: dict, coil: int, T_initial: float, schedule_time: np.
         'T_min': T_hist.min(axis=(1, 2)),
         'T_max': T_hist.max(axis=(1, 2)),
         'T_mean': (T_hist * volume).sum(axis=(1, 2)) / volume.sum(),
+        'grade': grade,
         'n_steps': n_steps,
         'dt_min': float(dt_min),
     }
 
 
-def simulate_stack(*, meshes: list[dict], T_initial: float, schedule_time: np.ndarray, schedule_temperature: np.ndarray, h_function: FunctionType = placeholder_h, lambda_r_function: FunctionType = placeholder_lambda_r, dt_max: float = 30.0, save_interval: float = 600.0, safety: float = 0.9) -> list[dict]:
+def simulate_stack(*, meshes: list[dict], T_initial: float, schedule_time: np.ndarray, schedule_temperature: np.ndarray, h_function: FunctionType = placeholder_h, lambda_r_function: FunctionType = placeholder_lambda_r, dt_max: float = 30.0, save_interval: float = 600.0, safety: float = 0.9, grades: list[str] | None = None) -> list[dict]:
     '''
     Simulate every coil of the stack with the same gas temperature history (for now) .
 
@@ -456,13 +504,19 @@ def simulate_stack(*, meshes: list[dict], T_initial: float, schedule_time: np.nd
         dt_max:               largest time step in s
         save_interval:        time between saved results in s
         safety:               factor in (0, 1] applied to the stability limit
+        grades:               steel grade of each coil, bottom coil first; None uses 'generic'.
+                              Must match the grades given to make_lambda_r_function.
 
     Returns:
         List with one result dict per coil (see simulate_coil), bottom coil first.
+
+    Raises:
+        ValueError if grades has the wrong length or an unknown grade.
     '''
+    grades = check_grades(grades=grades, n_coils=len(meshes))
     results = []
     for i, mesh in enumerate(meshes):
-        result = simulate_coil(mesh=mesh, coil=i, T_initial=T_initial, schedule_time=schedule_time, schedule_temperature=schedule_temperature, h_function=h_function, lambda_r_function=lambda_r_function, dt_max=dt_max, save_interval=save_interval, safety=safety)
+        result = simulate_coil(mesh=mesh, coil=i, T_initial=T_initial, schedule_time=schedule_time, schedule_temperature=schedule_temperature, h_function=h_function, lambda_r_function=lambda_r_function, dt_max=dt_max, save_interval=save_interval, safety=safety, grade=grades[i])
         results.append(result)
     return results
 
