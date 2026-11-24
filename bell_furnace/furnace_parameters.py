@@ -164,3 +164,18 @@ SCHEDULE_TERNIUM = {
     'cooling_time': 20.0 * HOUR,              # MOCK
 }
 
+# ------------------------------------------------------------------------------------------------
+# Gas schedule of the real charges (Recocido -Tec.xlsx), see cases.load_schedule
+# The data gives T_sat and t_sat per charge; the heating curve is not given, so the ramp is MOCK and
+# the hold is long enough for the cold spot to reach T_sat. The heating time is a model output.
+# ------------------------------------------------------------------------------------------------
+
+LOAD_SCHEDULE = {
+    'T_start': 303.15,              # MOCK: room temperature charge
+    'T_end': 423.15,                # MOCK
+    'heating_ramp': 8.0 * HOUR,     # MOCK: time for the gas to reach T_sat
+    'hold_horizon': 60.0 * HOUR,    # numerical: hold before the soak, long enough for the cold spot
+    'cooling_time': 20.0 * HOUR,    # MOCK
+}
+COLD_SPOT_MARGIN = 20.0             # MOCK: the charge is heated when the cold spot is within this of T_sat, in K
+

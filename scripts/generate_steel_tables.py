@@ -35,6 +35,7 @@ RHO_AISI_1010 = 7832.0
 C_ARMCO = 0.015  # Armco iron, C <= 0.02
 C_AISI_1010 = 0.10  # SAE 1010 range 0.08 to 0.13
 GRADE_CARBON = {
+    'IF': 0.003,      # interstitial free, C below Armco iron, clipped to the Armco row
     'SAE1006': 0.06,  # SAE 1006 range 0 to 0.08, commercial strip is usually near the top
     'SAE1010': C_AISI_1010,
 }
@@ -76,6 +77,7 @@ def grade_table(*, grade: str, T: np.ndarray, cp: np.ndarray) -> np.ndarray:
     if grade not in GRADE_CARBON:
         raise ValueError(f'grade must be one of {sorted(GRADE_CARBON)}')
     w = (GRADE_CARBON[grade] - C_ARMCO) / (C_AISI_1010 - C_ARMCO)  # 0 is Armco iron, 1 is AISI 1010
+    w = min(max(w, 0.0), 1.0)  # no extrapolation outside the two Incropera rows
     k_anchor = (1.0 - w) * K_ARMCO + w * K_AISI_1010
     rho = (1.0 - w) * RHO_ARMCO + w * RHO_AISI_1010
     k = conductivity(T=T, k_anchor=k_anchor)

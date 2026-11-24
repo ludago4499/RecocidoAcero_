@@ -12,6 +12,7 @@ Usage, from the project root:
     python scripts/run_mock_case.py --grade SAE1010          Ternium case, every coil SAE 1010
     python scripts/run_mock_case.py --case paper             paper case, generic steel
     python scripts/run_mock_case.py --animate                also write 4_heating.gif (--animate mp4 needs ffmpeg)
+    python scripts/run_mock_case.py --load 20122503142223    a real charge of Recocido -Tec.xlsx (3 to 5 coils)
 '''
 
 import argparse
@@ -25,7 +26,8 @@ from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bell_furnace.cases import CASES, build_case, probe_temperature  # noqa: E402
+from bell_furnace.cases import CASES, build_case, build_load_case, probe_temperature  # noqa: E402
+from pipeline.data_processing import load_data  # noqa: E402
 from bell_furnace.properties import STEEL_GRADES  # noqa: E402
 from bell_furnace.solver import SURFACES, make_h_function, make_lambda_r_function, simulate_stack, time_to_reach  # noqa: E402
 
@@ -44,8 +46,13 @@ def plot_histories(*, results: list[dict], path: Path, meshes: list[dict] | None
         reference: None, or dict with coil, r in m and T in K; draws the temperature at that radius
                    (mid-width) and the reference value on that coil's panel
     '''
-    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True, sharey=True)
-    for ax, i in zip(axes.flat, [3, 2, 1, 0]):  # top coil in the upper-left panel
+    n = len(results)
+    n_cols = 2 if n <= 4 else 3
+    n_rows = int(np.ceil(n / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.5 * n_cols, 3.5 * n_rows), sharex=True, sharey=True, squeeze=False)
+    for ax in axes.flat[n:]:
+        ax.set_visible(False)
+    for ax, i in zip(axes.flat, range(n - 1, -1, -1)):  # top coil in the upper-left panel
         r = results[i]
         t = r['time'] / HOUR # change to hour format
         ax.plot(t, r['T_gas'] - 273.15, '--', color='gray', label='Gas')
@@ -58,8 +65,9 @@ def plot_histories(*, results: list[dict], path: Path, meshes: list[dict] | None
             ax.legend(fontsize=8, loc='lower right')
         ax.set_title(f"Coil {i + 1}# ({r['grade']})")
         ax.grid(True)
-    for ax in axes[1]:
+    for ax in axes.flat[max(0, n - n_cols):n]:
         ax.set_xlabel('Time (h)')
+        ax.xaxis.set_tick_params(labelbottom=True)
     for ax in axes[:, 0]:
         ax.set_ylabel('Temperature (°C)')
     axes[0, 0].legend()
@@ -230,9 +238,17 @@ if __name__ == '__main__':
     parser.add_argument('--grade', choices=sorted(STEEL_GRADES), default=None, help='force this grade on every coil')
     parser.add_argument('--animate', nargs='?', const='gif', choices=('gif', 'mp4'), default=None, help='also write an animation of the stack heating (default gif; mp4 needs ffmpeg)')
     parser.add_argument('--fps', type=int, default=12, help='frames per second of the animation')
+    parser.add_argument('--load', type=int, default=None, help='RH- Carga of a real charge; overrides --case and --grade')
     args = parser.parse_args()
 
-    case = build_case(case=args.case, grade=args.grade, n_r=21, n_z=31)
+    if args.load is not None:
+        coils_table, loads_table = load_data()
+        T_sat_default = float(loads_table.loc[loads_table['T_sat_ok'], 'T_sat'].median())
+        case = build_load_case(load_id=args.load, coils_table=coils_table, loads_table=loads_table, T_sat_default=T_sat_default, n_r=21, n_z=31)
+        for problem in case['problems']:
+            print(f'warning: {problem}')
+    else:
+        case = build_case(case=args.case, grade=args.grade, n_r=21, n_z=31)
     meshes, grades = case['meshes'], case['grades']
     h_function = make_h_function(meshes=meshes, furnace=case['furnace'])
     lambda_r_function = make_lambda_r_function(strip_thickness=case['strip_thickness'], contact=case['contact'], grades=grades)

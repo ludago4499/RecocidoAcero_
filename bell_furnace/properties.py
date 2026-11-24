@@ -23,8 +23,21 @@ _H2_TABLE = np.loadtxt(_DATA / 'hydrogen.csv', delimiter=',')
 # empty means the case values are used. Ternium has not given hardness or roughness per grade.
 STEEL_GRADES = {
     'generic': {'file': 'steel.csv', 'contact': {}},
+    'IF': {'file': 'steel_if.csv', 'contact': {}},  # interstitial free, ultra low carbon (Armco iron row)
     'SAE1006': {'file': 'steel_sae1006.csv', 'contact': {}},
     'SAE1010': {'file': 'steel_sae1010.csv', 'contact': {}},
+}
+
+# Steel family in the Ternium data (RH-Familia acero) -> property grade used by the model.
+# Share of coils in Recocido -Tec.xlsx: CS 97.8 %, MS 1.6 %, GR50 0.4 %, AF 0.1 %, IF 0.1 %.
+# The property tables only change with carbon content (k and rho), and k of low carbon steels differs
+# by under 15 %, so the closest table is used. ESTIMATE entries must be confirmed with Ternium.
+FAMILY_TO_GRADE = {
+    'CS': 'SAE1006',    # commercial steel, low carbon
+    'IF': 'IF',         # interstitial free
+    'MS': 'SAE1010',    # ESTIMATE: meaning of MS not given by Ternium
+    'GR50': 'SAE1010',  # ESTIMATE: structural grade 50 (HSLA), no table with Mn / Nb, closest is SAE 1010
+    'AF': 'SAE1010',    # ESTIMATE: meaning of AF not given by Ternium
 }
 _STEEL_TABLES = {}  # cache, grade -> table
 

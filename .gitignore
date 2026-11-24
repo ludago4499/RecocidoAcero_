@@ -1,0 +1,32 @@
+# ------------------------------------------------------------------------------------------------
+# Ternium data: confidential, never commit. Keep it only on your computer, in the project root.
+# ------------------------------------------------------------------------------------------------
+*.xlsx
+*.xls
+*.xlsm
+~$*
+# tables derived from the Ternium data (contain charge ids, masses and plant times)
+results/ternium_loads/
+results/random_forest/
+results/optimization/
+data/private/
+
+# ------------------------------------------------------------------------------------------------
+# Python
+# ------------------------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+
+# ------------------------------------------------------------------------------------------------
+# Editors and OS
+# ------------------------------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
