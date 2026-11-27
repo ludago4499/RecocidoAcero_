@@ -43,13 +43,15 @@ FURNACE = {
     'cover_diameter': 2.10,       # MOCK: inner diameter of the inner cover in m
     'plate_gap': 0.08,            # MOCK: height of the convector plate passages in m
     'top_gap': 0.30,              # MOCK: height of the space above the top coil in m
-    'channel_model': 'simple',    # 'simple': same duct on every surface, 'detailed': bore, annulus and plate slots
+    'base_gap': 0.10,             # MOCK: height of the base convector passage under coil 1 in m ('scaled', base_convector)
+    'channel_model': 'simple',    # 'simple': same duct on every surface, 'scaled': Option C, bore, annulus and radial channels
+    'bottom_mode': 'yang',        # 'scaled' only. 'yang': no flow under coil 1 (paper); 'base_convector': full fan flow (decision log D2)
+    'flow_scale': 1.0,            # effective share of the rated fan flow, calibration parameter (decision log D7)
+    'psi_groups': {},             # 'scaled' only. multiplier of psi per group: bore, annulus, plates, top, base (decision log D6)
     # used by 'simple'
     'channel_area': 0.5,          # MOCK: flow area of the generic duct in m2
     'channel_D': 0.2,             # MOCK: hydraulic diameter of the generic duct in m
     'channel_L': 1.27,            # MOCK: flow length of the generic duct in m (about the coil width)
-    # used by 'detailed'
-    'cover_diameter': 2.10,
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -124,7 +126,10 @@ FURNACE_TERNIUM = {
     'flow_basis': 'actual',                       # the fan moves a fixed actual volume, not normal m3
     'q_flow': TERNIUM['flow_rate'],               # Ternium: 24.54 m3/s
     'cover_diameter': TERNIUM['bell_diameter'],   # Ternium: 2.451 m
-    'channel_model': 'simple',
+    'channel_model': 'scaled',                    # Option C, default from Nov 27 2026 (decision log D1, D10)
+    'bottom_mode': 'base_convector',              # ESTIMATE: HICON type base, fits the plant data better than 'yang' (D3)
+    'flow_scale': 0.33,                           # ESTIMATE: bore velocity about 40 m/s, rated 24.54 m3/s gives 121 m/s (D7)
+    # 'simple' keys below are kept so the old model can still be run with channel_model='simple'
     'channel_D': TERNIUM['bell_diameter'],        # Ternium: hydraulic diameter 2.451 m
     'channel_L': TERNIUM['operating_height'],     # Ternium: circulation length 5.250 m
     # ESTIMATE: Ternium has no flow area (point 5). Annulus between the bell and the largest coil.

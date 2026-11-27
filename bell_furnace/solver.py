@@ -24,14 +24,14 @@ import numpy as np
 
 try:
     # works when bell_furnace is imported as a package (import bell_furnace.solver)
-    from .convection import channel_geometry, composite_coefficient, convection_coefficient, simple_channel_geometry
+    from .convection import LAMINAR_NUSSELT, composite_coefficient, convection_coefficient, laminar_floor, reynolds_number, scaled_channel_geometry, simple_channel_geometry
     from .flow import actual_flow_rate, surface_flows
     from .mesh import stable_time_step
     from .properties import STEEL_GRADES, hydrogen_properties, steel_properties
     from .radial_conductivity import effective_radial_conductivity
 except ImportError:
     # works when running a script from inside the bell_furnace folder (python solver.py)
-    from convection import channel_geometry, composite_coefficient, convection_coefficient, simple_channel_geometry
+    from convection import LAMINAR_NUSSELT, composite_coefficient, convection_coefficient, laminar_floor, reynolds_number, scaled_channel_geometry, simple_channel_geometry
     from flow import actual_flow_rate, surface_flows
     from mesh import stable_time_step
     from properties import STEEL_GRADES, hydrogen_properties, steel_properties
@@ -203,9 +203,122 @@ def make_lambda_r_function(*, strip_thickness: list[float], contact: dict[str, f
 
     return lambda_r_function
 
+CHANNEL_MODELS = ('simple', 'scaled')
+SURFACE_GROUPS = ('bore', 'annulus', 'plates', 'top', 'base')
+
+
+def surface_group(*, coil: int, surface: str, n_coils: int) -> str:
+    '''
+    Name the calibration group of a coil surface (decision log D6).
+
+    Args:
+        coil:    index of the coil, 0 is the bottom coil
+        surface: inner, outer, bottom or top
+        n_coils: number of coils in the stack
+
+    Returns:
+        One of bore, annulus, plates, top (top face of the top coil) or base (bottom face of the
+        bottom coil).
+
+    Raises:
+        ValueError if surface is unknown.
+    '''
+    if surface == 'inner':
+        return 'bore'
+    if surface == 'outer':
+        return 'annulus'
+    if surface == 'bottom':
+        return 'base' if coil == 0 else 'plates'
+    if surface == 'top':
+        return 'top' if coil == n_coils - 1 else 'plates'
+    raise ValueError(f'unknown surface {surface!r}')
+
+
+def make_surface_model(*, meshes: list[dict], furnace: dict) -> FunctionType:
+    '''
+    Build the gas side state of every coil surface from Eqs. 5-8 (flow.py and convection.py).
+
+    The fan flow is read with furnace['flow_basis']:
+        'normal' (default): furnace['q_normal'] in Nm3/s, expanded to the gas temperature (paper)
+        'actual':           furnace['q_flow'] in m3/s at the gas temperature, constant (Ternium)
+    and multiplied by furnace['flow_scale'] (default 1), the effective share of the rated flow.
+
+    Optional keys used by channel_model 'scaled' (decision log D2 to D7): bottom_mode ('yang' or
+    'base_convector'), plate_gap, top_gap, base_gap, psi_groups (dict group: multiplier of psi, groups
+    in SURFACE_GROUPS) and the laminar floor on h.
+
+    Args:
+        meshes:  mesh dicts from mesh.build_stack, bottom coil first
+        furnace: furnace parameters (see furnace_parameters.FURNACE)
+
+    Returns:
+        Function (*, coil, T_g) returning, for inner, outer, bottom and top, a dict with keys
+        group, q (m3/s), area (m2), D (m), L (m), u (m/s), Re and h (W/(m2 K)).
+
+    Raises:
+        ValueError if furnace['channel_model'] is not 'simple' or 'scaled', furnace['flow_basis']
+        is not 'normal' or 'actual', or psi_groups has an unknown group.
+    '''
+    n_coils = len(meshes)
+    flow_basis = furnace.get('flow_basis', 'normal')
+    if flow_basis not in ('normal', 'actual'):
+        raise ValueError("flow_basis must be 'normal' or 'actual'")
+    model = furnace['channel_model']
+    if model not in CHANNEL_MODELS:
+        raise ValueError(f'channel_model must be one of {CHANNEL_MODELS}')
+    psi_groups = dict(furnace.get('psi_groups', {}))
+    unknown = set(psi_groups) - set(SURFACE_GROUPS)
+    if unknown:
+        raise ValueError(f'unknown groups in psi_groups: {sorted(unknown)}')
+    flow_scale = furnace.get('flow_scale', 1.0)
+
+    # Share of the fan flow that reaches each surface of each coil (Eqs. 5-6)
+    bottom_mode = furnace.get('bottom_mode', 'yang') if model == 'scaled' else 'yang'
+    fractions = surface_flows(q_total=1.0, n_coils=n_coils, zeta=furnace['zeta'], bottom_mode=bottom_mode)
+
+    # Channel area, D and L of each surface of each coil
+    channels = []
+    for i, mesh in enumerate(meshes):
+        if model == 'simple':
+            channel = simple_channel_geometry(area=furnace['channel_area'], D=furnace['channel_D'], L=furnace['channel_L'])
+        else:
+            channel = scaled_channel_geometry(r_in=mesh['r_in'], r_out=mesh['r_out'], width=mesh['width'], cover_radius=0.5 * furnace['cover_diameter'], plate_gap=furnace['plate_gap'], top_gap=furnace['top_gap'], base_gap=furnace['base_gap'], is_top_coil=(i == n_coils - 1))
+            if i == 0:
+                channel['bottom'] = channel['base']
+        channels.append(channel)
+
+    def surface_model(*, coil: int, T_g: float) -> dict[str, dict]:
+        if flow_basis == 'actual':
+            q_actual = furnace['q_flow']
+        else:
+            q_actual = actual_flow_rate(q_normal=furnace['q_normal'], T_g=T_g, pressure=furnace['pressure'])
+        q_actual *= flow_scale
+        rho_g, mu_g, k_g, _ = hydrogen_properties(T_g)
+        rho_g, mu_g, k_g = float(rho_g), float(mu_g), float(k_g)
+        state = {}
+        for surface in SURFACES:
+            group = surface_group(coil=coil, surface=surface, n_coils=n_coils)
+            channel = channels[coil][surface]
+            q_surface = q_actual * fractions[coil][surface]
+            if q_surface == 0.0:
+                state[surface] = {'group': group, 'q': 0.0, **channel, 'u': 0.0, 'Re': 0.0, 'h': 0.0}  # no gas flow on this surface
+                continue
+            u_g = q_surface / channel['area']
+            psi = furnace['psi'] * psi_groups.get(group, 1.0)
+            h_conv = convection_coefficient(u_g=u_g, D=channel['D'], L=channel['L'], k_g=k_g, mu_g=mu_g, rho_g=rho_g, psi=psi)
+            if model == 'scaled':
+                h_conv = laminar_floor(h=h_conv, D=channel['D'], k_g=k_g, nusselt=LAMINAR_NUSSELT[surface])
+            h = composite_coefficient(h=h_conv, T_g=T_g, xi=furnace['xi'])
+            Re = reynolds_number(u_g=u_g, D=channel['D'], mu_g=mu_g, rho_g=rho_g)
+            state[surface] = {'group': group, 'q': q_surface, **channel, 'u': u_g, 'Re': Re, 'h': h}
+        return state
+
+    return surface_model
+
+
 def make_h_function(*, meshes: list[dict], furnace: dict) -> FunctionType:
     '''
-    Build the surface coefficient plug-in from Eqs. 5-8 (flow.py and convection.py).
+    Build the surface coefficient plug-in from Eqs. 5-8 (see make_surface_model).
 
     Args:
         meshes:  mesh dicts from mesh.build_stack, bottom coil first
@@ -214,52 +327,42 @@ def make_h_function(*, meshes: list[dict], furnace: dict) -> FunctionType:
     Returns:
         Function (*, coil, T_g, time) returning h in W/(m2 K) on inner, outer, bottom and top.
 
-    The fan flow is read with furnace['flow_basis']:
-        'normal' (default): furnace['q_normal'] in Nm3/s, expanded to the gas temperature (paper)
-        'actual':           furnace['q_flow'] in m3/s at the gas temperature, constant (Ternium)
-
     Raises:
-        ValueError if furnace['channel_model'] is not 'simple' or 'detailed', or
-        furnace['flow_basis'] is not 'normal' or 'actual'.
+        ValueError if the furnace parameters are not valid, see make_surface_model.
     '''
-    n_coils = len(meshes)
-    flow_basis = furnace.get('flow_basis', 'normal')
-    if flow_basis not in ('normal', 'actual'):
-        raise ValueError("flow_basis must be 'normal' or 'actual'")
-
-    # Share of the fan flow that reaches each surface of each coil (Eqs. 5-6)
-    fractions = surface_flows(q_total=1.0, n_coils=n_coils, zeta=furnace['zeta'])
-
-    # Channel area, D and L of each surface of each coil
-    channels = []
-    for i, mesh in enumerate(meshes):
-        if furnace['channel_model'] == 'simple':
-            channel = simple_channel_geometry(area=furnace['channel_area'], D=furnace['channel_D'], L=furnace['channel_L'])
-        elif furnace['channel_model'] == 'detailed':
-            channel = channel_geometry(r_in=mesh['r_in'], r_out=mesh['r_out'], width=mesh['width'], cover_radius=0.5 * furnace['cover_diameter'], plate_gap=furnace['plate_gap'], top_gap=furnace['top_gap'], is_top_coil=(i == n_coils - 1))
-        else:
-            raise ValueError("channel_model must be 'simple' or 'detailed'")
-        channels.append(channel)
+    surface_model = make_surface_model(meshes=meshes, furnace=furnace)
 
     def h_function(*, coil: int, T_g: float, time: float) -> dict[str, float]:
-        if flow_basis == 'actual':
-            q_actual = furnace['q_flow']
-        else:
-            q_actual = actual_flow_rate(q_normal=furnace['q_normal'], T_g=T_g, pressure=furnace['pressure'])
-        rho_g, mu_g, k_g, _ = hydrogen_properties(T_g)
-        h = {}
-        for surface in SURFACES:
-            q_surface = q_actual * fractions[coil][surface]
-            if q_surface == 0.0:
-                h[surface] = 0.0  # no gas flow on this surface
-                continue
-            channel = channels[coil][surface]
-            u_g = q_surface / channel['area']
-            h_conv = convection_coefficient(u_g=u_g, D=channel['D'], L=channel['L'], k_g=float(k_g), mu_g=float(mu_g), rho_g=float(rho_g), psi=furnace['psi'])
-            h[surface] = composite_coefficient(h=h_conv, T_g=T_g, xi=furnace['xi'])
-        return h
+        return {surface: values['h'] for surface, values in surface_model(coil=coil, T_g=T_g).items()}
 
     return h_function
+
+
+def flow_report(*, meshes: list[dict], furnace: dict, T_g: float, u_max: float = 40.0) -> list[dict]:
+    '''
+    Tabulate flow, velocity, Reynolds number and h on every surface of a stack at one gas temperature.
+
+    Used to check that the gas side is physical before running a case (decision log D7).
+
+    Args:
+        meshes:  mesh dicts from mesh.build_stack, bottom coil first
+        furnace: furnace parameters (see furnace_parameters.FURNACE)
+        T_g:     gas temperature in K
+        u_max:   velocity above which a surface is flagged in m/s
+
+    Returns:
+        One dict per coil surface with keys coil (1 = bottom), surface, group, q, area, D, L, u, Re,
+        h and flag (true when u > u_max).
+
+    Raises:
+        ValueError if the furnace parameters are not valid, see make_surface_model.
+    '''
+    surface_model = make_surface_model(meshes=meshes, furnace=furnace)
+    rows = []
+    for coil in range(len(meshes)):
+        for surface, values in surface_model(coil=coil, T_g=T_g).items():
+            rows.append({'coil': coil + 1, 'surface': surface, **values, 'flag': values['u'] > u_max})
+    return rows
 
 # ------------------------------------------------------------------------------------------------
 # Building blocks of one time step

@@ -174,26 +174,45 @@ def simple_channel_geometry(*, area: float, D: float, L: float) -> dict[str, dic
     return {surface: dict(channel) for surface in ('inner', 'outer', 'bottom', 'top')}
 
 
-# Channel geometry generated and not verified. Currently not in use...
-def channel_geometry(*, r_in: float, r_out: float, width: float, cover_radius: float, plate_gap: float, top_gap: float, is_top_coil: bool) -> dict[str, dict[str, float]]:
+# ------------------------------------------------------------------------------------------------
+# Option C: scaled channels. Each surface has its own flow area, hydraulic diameter and length
+# (decision log D4, D5). Replaces the unverified 'detailed' geometry.
+# ------------------------------------------------------------------------------------------------
+
+LAMINAR_NUSSELT = {
+    'inner': 3.66,   # fully developed laminar flow in a tube, constant wall temperature
+    'outer': 3.66,   # annulus, taken as a tube with its hydraulic diameter
+    'bottom': 7.54,  # parallel plate channel, constant wall temperature
+    'top': 7.54,
+}
+
+
+def scaled_channel_geometry(*, r_in: float, r_out: float, width: float, cover_radius: float, plate_gap: float, top_gap: float, base_gap: float, is_top_coil: bool) -> dict[str, dict[str, float]]:
     '''
     Compute flow area, hydraulic diameter and flow length of the channel next to each coil surface.
 
-    Channels (simplified, the paper does not give the furnace geometry):
-        inner:  the coil bore, a pipe of radius r_in and length width
+    Channels of Option C (decision log D4):
+        inner:  the coil bore, a tube of radius r_in and length width
         outer:  the annulus between the coil and the inner cover, length width
-        bottom: the convector plate below the coil, radial flow through a slot of height plate_gap,
-                flow area taken at the mean radius, length r_out - r_in
-        top:    the convector plate above the coil, or the top space under the inner cover for
-                the top coil (height top_gap)
+        bottom: radial channel under the coil; the convector plate below (height plate_gap) or the
+                base convector for the bottom coil (height base_gap)
+        top:    radial channel above the coil; the convector plate above, or the top passage under
+                the inner cover for the top coil (height top_gap)
+
+    A convector plate has radial vanes on both sides of a centre sheet, so each coil face sees its
+    own channel of height plate_gap / 2 carrying half the plate flow. The velocity is the same as the
+    full plate flow through the full gap, and the hydraulic diameter of each face channel is plate_gap.
+    The top passage and the base convector have one coil face, so their hydraulic diameter is twice
+    the gap. Radial channels are evaluated at the mean radius of the coil.
 
     Args:
         r_in:         coil inner radius in m
         r_out:        coil outer radius in m
         width:        coil width in m
         cover_radius: inner radius of the inner cover in m
-        plate_gap:    height of the convector plate passages in m
-        top_gap:      height of the space above the top coil in m
+        plate_gap:    height of the convector plate between two coils in m
+        top_gap:      height of the passage above the top coil in m
+        base_gap:     height of the base convector passage under the bottom coil in m
         is_top_coil:  true for the top coil of the stack
 
     Returns:
@@ -203,8 +222,8 @@ def channel_geometry(*, r_in: float, r_out: float, width: float, cover_radius: f
     Raises:
         ValueError if a dimension is not positive, r_in >= r_out or cover_radius <= r_out.
     '''
-    if min(r_in, width, plate_gap, top_gap) <= 0.0:
-        raise ValueError('r_in, width, plate_gap and top_gap must be positive in m')
+    if min(r_in, width, plate_gap, top_gap, base_gap) <= 0.0:
+        raise ValueError('r_in, width, plate_gap, top_gap and base_gap must be positive in m')
     if r_out <= r_in:
         raise ValueError('r_out must be larger than r_in')
     if cover_radius <= r_out:
@@ -213,13 +232,62 @@ def channel_geometry(*, r_in: float, r_out: float, width: float, cover_radius: f
     r_mean = 0.5 * (r_in + r_out)
     radial_length = r_out - r_in
 
-    def slot(gap: float) -> dict[str, float]:
-        # radial slot between two parallel discs: hydraulic diameter of parallel plates is 2 gap
-        return {'area': 2.0 * np.pi * r_mean * gap, 'D': 2.0 * gap, 'L': radial_length}
+    def radial(gap: float, D: float) -> dict[str, float]:
+        return {'area': 2.0 * np.pi * r_mean * gap, 'D': D, 'L': radial_length}
 
     return {
         'inner': {'area': np.pi * r_in**2, 'D': 2.0 * r_in, 'L': width},
         'outer': {'area': np.pi * (cover_radius**2 - r_out**2), 'D': 2.0 * (cover_radius - r_out), 'L': width},
-        'bottom': slot(plate_gap),
-        'top': slot(top_gap if is_top_coil else plate_gap),
+        'bottom': radial(plate_gap, plate_gap),   # bottom coil: replaced by the base convector in the solver
+        'top': radial(top_gap, 2.0 * top_gap) if is_top_coil else radial(plate_gap, plate_gap),
+        'base': radial(base_gap, 2.0 * base_gap),
     }
+
+
+def reynolds_number(*, u_g: float, D: float, mu_g: float, rho_g: float) -> float:
+    '''
+    Compute the Reynolds number of the gas in a channel.
+
+    Args:
+        u_g:   mean gas velocity in m/s
+        D:     hydraulic diameter in m
+        mu_g:  gas dynamic viscosity in Pa s
+        rho_g: gas density in kg/m3
+
+    Returns:
+        Reynolds number.
+
+    Raises:
+        ValueError if u_g is negative or D, mu_g or rho_g is not positive.
+    '''
+    if u_g < 0.0:
+        raise ValueError('u_g cannot be negative')
+    if min(D, mu_g, rho_g) <= 0.0:
+        raise ValueError('D, mu_g and rho_g must be positive')
+    return rho_g * u_g * D / mu_g
+
+
+def laminar_floor(*, h: float, D: float, k_g: float, nusselt: float) -> float:
+    '''
+    Keep a coefficient from Eq. 7 above the fully developed laminar value.
+
+    Eq. 7 (Dittus-Boelter) is a turbulent correlation; at low Reynolds number it drops below the
+    laminar limit, which no real channel does (decision log D5).
+
+    Args:
+        h:       coefficient from Eq. 7 in W/(m2 K)
+        D:       hydraulic diameter in m
+        k_g:     gas thermal conductivity in W/(m K)
+        nusselt: laminar Nusselt number of the channel
+
+    Returns:
+        max(h, nusselt k_g / D) in W/(m2 K).
+
+    Raises:
+        ValueError if h is negative or D, k_g or nusselt is not positive.
+    '''
+    if h < 0.0:
+        raise ValueError('h cannot be negative')
+    if min(D, k_g, nusselt) <= 0.0:
+        raise ValueError('D, k_g and nusselt must be positive')
+    return max(h, nusselt * k_g / D)

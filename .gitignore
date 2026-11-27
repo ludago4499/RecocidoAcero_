@@ -30,3 +30,6 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# derived from the confidential Excel
+results/gas_models/

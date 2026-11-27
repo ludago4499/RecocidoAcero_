@@ -128,19 +128,30 @@ def channel_flows(
     return q_plates, q_sides, q_top
 
 
+BOTTOM_MODES = ('yang', 'base_convector')
+
+
 def surface_flows(
     *,
     q_total: float,
     n_coils: int,
-    zeta: float
+    zeta: float,
+    bottom_mode: str = 'yang'
 ) -> list[dict[str, float]]:
     '''
     Calculate gas flow assigned to every surface of every coil.
 
+    Plates take a share of the flow that still rises in the annulus, weighted toward the lower
+    plates (Yang et al. 2025, Eqs. 5-6, Table 1). The bottom face of the bottom coil is a boundary
+    condition chosen with bottom_mode:
+        'yang':           no convector plate under coil 1, no gas flow on that face (Yang et al. 2025)
+        'base_convector': the base convector carries the full fan discharge under coil 1 (HICON type)
+
     Args:
-        q_total: total volumetric gas flow in m3/s.
-        n_coils: number of coils in the stack.
-        zeta: flow attenuation coefficient.
+        q_total:     total volumetric gas flow in m3/s
+        n_coils:     number of coils in the stack
+        zeta:        flow attenuation coefficient
+        bottom_mode: boundary condition of the bottom face of coil 1, 'yang' or 'base_convector'
 
     Returns:
         List containing one dictionary per coil. Each dictionary
@@ -148,9 +159,14 @@ def surface_flows(
         surfaces in m3/s.
 
     Raises:
-        ValueError if n_coils is less than 2 or q_total or zeta is
-        not positive.
+        ValueError if n_coils is less than 2, q_total or zeta is
+        not positive, or bottom_mode is unknown.
     '''
+
+    if bottom_mode not in BOTTOM_MODES:
+        raise ValueError(
+            f"bottom_mode must be one of {BOTTOM_MODES}."
+        )
 
     fd = flow_distribution_coefficients(
         n_coils=n_coils,
@@ -168,7 +184,7 @@ def surface_flows(
 
         # Bottom surface
         if i == 0:
-            bottom = 0.0
+            bottom = q_total if bottom_mode == 'base_convector' else 0.0
         else:
             bottom = q_plates[i - 1]
 
